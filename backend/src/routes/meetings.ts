@@ -2,12 +2,15 @@ import { Router, Request, Response } from 'express';
 import multer, { FileFilterCallback } from 'multer';
 import axios from 'axios';
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import { createClerkClient } from '@clerk/backend';
 import { db } from '../db';
 import { meetings, meetingParticipants, actionItems } from '../db/schema';
 import { eq, and, or, desc } from 'drizzle-orm';
 import path from 'path';
 
 const router = Router();
+
+const clerkClient = createClerkClient({ secretKey: process.env.CLERK_SECRET_KEY! });
 
 // Extend Express Request type for multer
 declare global {
@@ -52,7 +55,7 @@ const upload = multer({
 });
 
 // Helper function to process meeting asynchronously
-async function processMeeting(meetingId: string, audioBuffer: Buffer, transcriptId?: string) {
+async function processMeeting(meetingId: string, audioBuffer?: Buffer, existingUploadUrl?: string) {
   try {
     const ASSEMBLYAI_API_KEY = process.env.ASSEMBLYAI_API_KEY;
     const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
@@ -62,10 +65,10 @@ async function processMeeting(meetingId: string, audioBuffer: Buffer, transcript
     }
 
     // Step 1: Upload audio to AssemblyAI (if no transcriptId provided)
-    let uploadUrl: string | null = null;
-    let currentTranscriptId = transcriptId;
+    let uploadUrl: string | null = existingUploadUrl || null;
+    let currentTranscriptId: string | undefined;
 
-    if (!currentTranscriptId) {
+    if (!uploadUrl && audioBuffer) {
       const uploadResponse = await axios.post(
         'https://api.assemblyai.com/v2/upload',
         audioBuffer,
@@ -79,29 +82,32 @@ async function processMeeting(meetingId: string, audioBuffer: Buffer, transcript
       uploadUrl = uploadResponse.data.upload_url;
     }
 
-    // Step 2: Request transcript (if no transcriptId provided)
-    if (!currentTranscriptId && uploadUrl) {
-      const transcriptResponse = await axios.post(
-        'https://api.assemblyai.com/v2/transcript',
-        { audio_url: uploadUrl },
-        {
-          headers: {
-            'authorization': ASSEMBLYAI_API_KEY,
-            'content-type': 'application/json',
-          },
-        }
-      );
-      currentTranscriptId = transcriptResponse.data.id;
-      
-      // Update meeting with transcript ID
-      await db.update(meetings)
-        .set({ 
-          audioUrl: uploadUrl,
-          status: 'transcribing',
-          updatedAt: new Date()
-        })
-        .where(eq(meetings.id, meetingId));
+    if(!uploadUrl){
+      throw new Error('No audio available to process (no buffer and no stored audioUrl)');
     }
+
+    const transcriptResponse = await axios.post(
+      'https://api.assemblyai.com/v2/transcript',
+      {
+        audio_url: uploadUrl,
+      },
+      {
+        headers: {
+          'authorization': ASSEMBLYAI_API_KEY,
+          'content-type': 'application/json',
+        },
+      }
+    );
+    currentTranscriptId = transcriptResponse.data.id;
+      
+    // Update meeting with transcript ID
+    await db.update(meetings)
+      .set({ 
+        audioUrl: uploadUrl,
+        status: 'transcribing',
+        updatedAt: new Date()
+      })
+      .where(eq(meetings.id, meetingId));
 
     if (!currentTranscriptId) {
       throw new Error('Failed to get transcript ID');
@@ -153,6 +159,8 @@ async function processMeeting(meetingId: string, audioBuffer: Buffer, transcript
     const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
     const model = genAI.getGenerativeModel({ model: 'gemini-3.5-flash' });
 
+    const today = new Date().toISOString().split('T')[0]; // e.g. "2026-08-01"
+
     const prompt = `Analyze this meeting transcript and return ONLY valid JSON with this exact structure:
 {
   "summary": "Brief summary of the meeting",
@@ -163,7 +171,8 @@ async function processMeeting(meetingId: string, audioBuffer: Buffer, transcript
     {
       "task": "Specific task description",
       "owner": "Name of person responsible (or null if not specified)",
-      "priority": "low" or "medium" or "high"
+      "priority": "low" or "medium" or "high",
+      "dueDate": "YYYY-MM-DD format if a deadline is mentioned (convert relative dates like 'Thursday' or 'next week' to an actual date based on today being ${today}), or null if no deadline is mentioned"
     }
   ]
 }
@@ -200,9 +209,10 @@ ${transcriptText}`;
         await db.insert(actionItems).values({
           meetingId,
           task: item.task || 'Untitled task',
-          ownerUserId: null, // owner is just a name string, not a real user ID yet
-          ownerName: item.owner || null, // save the owner name from Gemini
+          ownerUserId: null,
+          ownerName: item.owner || null,
           priority: item.priority || 'medium',
+          dueDate: item.dueDate ? new Date(item.dueDate) : null,
           status: 'pending',
           createdAt: new Date(),
           updatedAt: new Date(),
@@ -292,10 +302,78 @@ router.get('/', async (req: Request, res: Response) => {
       )
       .orderBy(desc(meetings.createdAt));
 
-    res.json(userMeetings);
+    // Get participant data for all meetings in a single query
+    const meetingIds = userMeetings.map(m => m.id);
+    let participantsData: any[] = [];
+    if (meetingIds.length > 0) {
+      participantsData = await db
+        .select({
+          meetingId: meetingParticipants.meetingId,
+          email: meetingParticipants.email,
+        })
+        .from(meetingParticipants);
+      
+      // Filter in memory to match meetingIds (Drizzle limitation with IN clause)
+      participantsData = participantsData.filter(p => meetingIds.includes(p.meetingId));
+    }
+
+    // Group participants by meetingId
+    const participantsByMeeting: Record<string, string[]> = {};
+    participantsData.forEach(p => {
+      if (!participantsByMeeting[p.meetingId]) {
+        participantsByMeeting[p.meetingId] = [];
+      }
+      participantsByMeeting[p.meetingId].push(p.email);
+    });
+
+    // Add participants to each meeting
+    const meetingsWithParticipants = userMeetings.map(meeting => ({
+      ...meeting,
+      participants: participantsByMeeting[meeting.id] || []
+    }));
+
+    res.json(meetingsWithParticipants);
   } catch (error) {
     console.error('Error fetching meetings:', error);
     res.status(500).json({ error: 'Failed to fetch meetings' });
+  }
+});
+
+// GET /api/meetings/action-items - Get all action items across meetings the user can access
+router.get('/action-items', async (req: Request, res: Response) => {
+  try {
+    const userId = req.userId;
+    if (!userId) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const items = await db
+      .select({
+        id: actionItems.id,
+        meetingId: actionItems.meetingId,
+        meetingTitle: meetings.title,
+        task: actionItems.task,
+        ownerName: actionItems.ownerName,
+        priority: actionItems.priority,
+        status: actionItems.status,
+        createdAt: actionItems.createdAt,
+        updatedAt: actionItems.updatedAt,
+      })
+      .from(actionItems)
+      .innerJoin(meetings, eq(actionItems.meetingId, meetings.id))
+      .leftJoin(meetingParticipants, eq(meetings.id, meetingParticipants.meetingId))
+      .where(
+        or(
+          eq(meetings.creatorId, userId),
+          eq(meetingParticipants.userId, userId)
+        )
+      )
+      .orderBy(desc(actionItems.createdAt));
+
+    res.json(items);
+  } catch (error) {
+    console.error('Error fetching action items:', error);
+    res.status(500).json({ error: 'Failed to fetch action items' });
   }
 });
 
@@ -343,10 +421,21 @@ router.get('/:id', async (req: Request, res: Response) => {
       .where(eq(actionItems.meetingId, meetingId))
       .orderBy(actionItems.createdAt);
 
+    // Get participants (only for creator)
+    let participants: any[] = [];
+    if (isCreator) {
+      participants = await db
+        .select()
+        .from(meetingParticipants)
+        .where(eq(meetingParticipants.meetingId, meetingId))
+        .orderBy(meetingParticipants.invitedAt);
+    }
+
     res.json({
       ...meetingData,
       role: isCreator ? 'creator' : 'participant',
       actionItems: items,
+      participants: isCreator ? participants : undefined,
     });
   } catch (error) {
     console.error('Error fetching meeting:', error);
@@ -383,6 +472,10 @@ router.post('/:id/retry', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Only failed meetings can be retried' });
     }
 
+    if (!meeting.audioUrl) {
+      return res.status(400).json({ error: 'No stored audio available for this meeting. Please create a new meeting instead.' });
+    }
+
     // Update status to uploading
     await db.update(meetings)
       .set({
@@ -391,10 +484,12 @@ router.post('/:id/retry', async (req: Request, res: Response) => {
       })
       .where(eq(meetings.id, meetingId));
 
-    // Retry processing (if we have audioUrl, we can skip upload)
-    // For now, we'll need the audio buffer again - this is a limitation
-    // In a real implementation, you'd store the audio file or re-upload from client
-    res.json({ message: 'Meeting retry initiated. Please re-upload the audio file.' });
+    // Actually re-trigger processing using the stored audio URL
+    processMeeting(meetingId, undefined, meeting.audioUrl).catch(error => {
+      console.error('Retry processing error:', error);
+    });
+
+    res.json({ message: 'Meeting retry initiated.' });
   } catch (error) {
     console.error('Error retrying meeting:', error);
     res.status(500).json({ error: 'Failed to retry meeting' });
@@ -457,6 +552,190 @@ router.patch('/:id/action-items/:itemId', async (req: Request, res: Response) =>
   } catch (error) {
     console.error('Error updating action item:', error);
     res.status(500).json({ error: 'Failed to update action item' });
+  }
+});
+
+// POST /api/meetings/:id/participants - Invite a participant by email (creator-only)
+router.post('/:id/participants', async (req: Request, res: Response) => {
+  try {
+    const userId = req.userId;
+    if (!userId) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const meetingId = req.params.id;
+    const { email, canEdit = false } = req.body;
+
+    if (!email) {
+      return res.status(400).json({ error: 'Email is required' });
+    }
+
+    // Check if user is the creator
+    const [meeting] = await db
+      .select()
+      .from(meetings)
+      .where(eq(meetings.id, meetingId))
+      .limit(1);
+
+    if (!meeting) {
+      return res.status(404).json({ error: 'Meeting not found' });
+    }
+
+    if (meeting.creatorId !== userId) {
+      return res.status(403).json({ error: 'Only the creator can invite participants' });
+    }
+
+    // Look up Clerk user by email
+    const users = await clerkClient.users.getUserList({
+      emailAddress: [email],
+    });
+
+    if (users.data.length === 0) {
+      return res.status(404).json({ error: 'No user found with that email — they need to sign up first' });
+    }
+
+    const invitedUser = users.data[0];
+    const invitedUserId = invitedUser.id;
+
+    // Prevent inviting the creator themselves
+    if (invitedUserId === userId) {
+      return res.status(400).json({ error: 'You cannot invite yourself to the meeting' });
+    }
+
+    // Check if user is already a participant
+    const existingParticipant = await db
+      .select()
+      .from(meetingParticipants)
+      .where(
+        and(
+          eq(meetingParticipants.meetingId, meetingId),
+          eq(meetingParticipants.userId, invitedUserId)
+        )
+      )
+      .limit(1);
+
+    if (existingParticipant.length > 0) {
+      return res.status(400).json({ error: 'This user is already invited to the meeting' });
+    }
+
+    // Insert new participant
+    const [newParticipant] = await db
+      .insert(meetingParticipants)
+      .values({
+        meetingId,
+        userId: invitedUserId,
+        email,
+        canEdit,
+        invitedAt: new Date(),
+      })
+      .returning();
+
+    res.status(201).json(newParticipant);
+  } catch (error) {
+    console.error('Error inviting participant:', error);
+    res.status(500).json({ error: 'Failed to invite participant' });
+  }
+});
+
+// DELETE /api/meetings/:id/participants/:userId - Remove a participant (creator-only)
+router.delete('/:id/participants/:userId', async (req: Request, res: Response) => {
+  try {
+    const userId = req.userId;
+    if (!userId) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const meetingId = req.params.id;
+    const participantUserId = req.params.userId;
+
+    // Check if user is the creator
+    const [meeting] = await db
+      .select()
+      .from(meetings)
+      .where(eq(meetings.id, meetingId))
+      .limit(1);
+
+    if (!meeting) {
+      return res.status(404).json({ error: 'Meeting not found' });
+    }
+
+    if (meeting.creatorId !== userId) {
+      return res.status(403).json({ error: 'Only the creator can remove participants' });
+    }
+
+    // Delete the participant
+    const deletedParticipant = await db
+      .delete(meetingParticipants)
+      .where(
+        and(
+          eq(meetingParticipants.meetingId, meetingId),
+          eq(meetingParticipants.userId, participantUserId)
+        )
+      )
+      .returning();
+
+    if (deletedParticipant.length === 0) {
+      return res.status(404).json({ error: 'Participant not found' });
+    }
+
+    res.json(deletedParticipant[0]);
+  } catch (error) {
+    console.error('Error removing participant:', error);
+    res.status(500).json({ error: 'Failed to remove participant' });
+  }
+});
+
+// PATCH /api/meetings/:id/participants/:userId - Toggle canEdit permission (creator-only)
+router.patch('/:id/participants/:userId', async (req: Request, res: Response) => {
+  try {
+    const userId = req.userId;
+    if (!userId) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const meetingId = req.params.id;
+    const participantUserId = req.params.userId;
+    const { canEdit } = req.body;
+
+    if (typeof canEdit !== 'boolean') {
+      return res.status(400).json({ error: 'canEdit must be a boolean' });
+    }
+
+    // Check if user is the creator
+    const [meeting] = await db
+      .select()
+      .from(meetings)
+      .where(eq(meetings.id, meetingId))
+      .limit(1);
+
+    if (!meeting) {
+      return res.status(404).json({ error: 'Meeting not found' });
+    }
+
+    if (meeting.creatorId !== userId) {
+      return res.status(403).json({ error: 'Only the creator can modify participant permissions' });
+    }
+
+    // Update the participant's canEdit permission
+    const [updatedParticipant] = await db
+      .update(meetingParticipants)
+      .set({ canEdit })
+      .where(
+        and(
+          eq(meetingParticipants.meetingId, meetingId),
+          eq(meetingParticipants.userId, participantUserId)
+        )
+      )
+      .returning();
+
+    if (!updatedParticipant) {
+      return res.status(404).json({ error: 'Participant not found' });
+    }
+
+    res.json(updatedParticipant);
+  } catch (error) {
+    console.error('Error updating participant:', error);
+    res.status(500).json({ error: 'Failed to update participant' });
   }
 });
 

@@ -6,7 +6,7 @@ import { usePathname } from 'next/navigation';
 import Link from 'next/link';
 import Logo from '@/components/Logo';
 import ThemeToggle from '@/components/ThemeToggle';
-import { Calendar, CheckSquare, Users, Settings, Menu, X, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Calendar, CheckSquare, Settings, Menu, X, ChevronLeft, ChevronRight } from 'lucide-react';
 
 export default function DashboardLayout({
   children,
@@ -26,7 +26,6 @@ export default function DashboardLayout({
   const navLinks = [
     { href: '/dashboard', label: 'Meetings', icon: Calendar },
     { href: '/dashboard/tasks', label: 'Tasks', icon: CheckSquare },
-    { href: '/dashboard/participants', label: 'Participants', icon: Users },
     { href: '/dashboard/settings', label: 'Settings', icon: Settings },
   ];
 

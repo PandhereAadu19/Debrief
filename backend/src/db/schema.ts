@@ -19,6 +19,7 @@ export const meetingParticipants = pgTable("meeting_participants", {
   id: uuid("id").defaultRandom().primaryKey(),
   meetingId: uuid("meeting_id").notNull().references(() => meetings.id),
   userId: text("user_id").notNull(),
+  email: text("email").notNull(),
   canEdit: boolean("can_edit").notNull().default(false),
   invitedAt: timestamp("invited_at").defaultNow().notNull(),
 });

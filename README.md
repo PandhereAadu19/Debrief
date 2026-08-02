@@ -36,9 +36,10 @@ Debrief solves this with a real, working pipeline: audio in, structured intellig
 - **Automatic transcription** — AssemblyAI
 - **Structured AI output** — Google Gemini extracts an Executive Summary, Key Decisions, Risks, Open Questions, and a structured Action Item list (task, owner name, priority, due date where mentioned)
 - **Retry on failure** — if AI processing fails, a retry button re-triggers the pipeline on the stored audio
-- **Task tracking** — each action item is independently marked pending/done by a human, not auto-detected
-- **Cross-meeting task dashboard** — a single view aggregating all of a user's open action items across every meeting they're part of, not buried inside individual meeting pages
-- **Meeting Creator / Participant roles** — the meeting creator can invite specific teammates to view a shared meeting; participants can check off tasks assigned to them, with an optional `canEdit` permission for editing the summary
+- **Task tracking** — each action item is independently marked pending / in progress / completed by a human, not auto-detected
+- **Cross-meeting task dashboard** — a single view aggregating all of a user's open action items across every meeting they're part of, not buried inside individual meeting pages, with priority grouping and status filtering
+- **Status filtering on the main dashboard** — filter meetings by All / Completed / Processing / Failed
+- **Meeting Creator / Participant roles** — the meeting creator can invite specific teammates by email to view a shared meeting; participants can check off tasks and see the same summary, with an optional `canEdit` permission for editing the meeting's content
 - **Dark / light mode**, fully responsive across devices
 
 ---
@@ -49,10 +50,12 @@ A simplified, per-meeting role model rather than a global org hierarchy:
 
 | Role | Determined by | Can do |
 |---|---|---|
-| **Creator** | Created the meeting (uploaded/recorded the audio) | Edit summary/action items, delete meeting, invite/remove participants |
-| **Participant** | Invited to a specific meeting | View transcript/summary, check off tasks assigned to them, edit if granted `canEdit` |
+| **Creator** | Created the meeting (uploaded/recorded the audio) | Edit summary/action items, retry failed processing, invite/remove participants, toggle participant `canEdit` |
+| **Participant** | Invited to a specific meeting by email | View transcript/summary, check off action items, edit if granted `canEdit` |
 
 There is a single sign-up flow for everyone — no "choose your role" step. Role is contextual per meeting, not a global user attribute, which keeps the permission model simple and correct without building a full organizational hierarchy.
+
+**Note on scope:** `canEdit` is granted per-meeting, not per-task. A Participant with `canEdit` can edit any action item in a shared meeting, not only ones assigned to them by name. See Future Improvements below.
 
 ---
 
@@ -68,7 +71,7 @@ There is a single sign-up flow for everyone — no "choose your role" step. Role
 - Node.js + Express (TypeScript)
 - Drizzle ORM
 - Neon (serverless Postgres)
-- Clerk backend SDK (token verification)
+- Clerk backend SDK (token verification, user lookup by email for invites)
 
 **External APIs**
 - AssemblyAI — speech-to-text transcription
@@ -86,22 +89,25 @@ There is a single sign-up flow for everyone — no "choose your role" step. Role
 ```
 1. User signs up / logs in
 2. Dashboard shows: meetings they own, meetings shared with them,
-   and a cross-meeting task list of everything assigned to them
+   aggregate stats (total meetings, open action items, completed this week),
+   and a status filter (All / Completed / Processing / Failed)
 3. User creates a new meeting: uploads or records audio, gives it a title
    → meeting record created, status = "uploading"
 4. Backend sends audio to AssemblyAI → transcript returned and saved,
    status = "transcribing"
 5. Backend sends transcript to Gemini → executive summary, key decisions,
-   risks, open questions, and action items (with owners/priority where
-   mentioned) returned and saved → status = "completed" (or "failed")
+   risks, open questions, and action items (with owner name, priority,
+   and due date where mentioned) returned and saved → status = "completed"
+   (or "failed")
 6. Creator opens the meeting: reviews the structured output,
-   invites teammates by email if the meeting should be shared
-7. Invited Participants see the same meeting, check off their own
-   assigned tasks as they complete them in real life
+   invites teammates by email if the meeting should be shared,
+   optionally grants them canEdit
+7. Invited Participants see the same meeting and can check off
+   action items as they complete them in real life
 8. Anyone can revisit the Tasks page to see everything still open
-   across all their meetings
+   across all their meetings, grouped by priority
 9. If processing fails at any point, a Retry button re-triggers
-   the pipeline on the stored audio
+   the full pipeline using the already-stored audio — no re-upload needed
 ```
 
 This is intentionally **not real-time** — processing happens after the meeting ends, not during a live call. Live-call integration (joining Zoom/Meet, streaming transcription, bot infrastructure) requires infrastructure far beyond what's realistic for this project's timeline, and is the reason products like Fireflies represent a mature, multi-year, funded engineering effort rather than something to replicate in a portfolio project.
@@ -116,12 +122,12 @@ meetings: {
   creatorId: text            // Clerk user id
   title: text
   transcript: text            // AssemblyAI output
-  audioUrl: text
-  summary: text                 // Gemini-generated executive summary
+  audioUrl: text                 // stored AssemblyAI audio URL, reused on retry
+  summary: text                     // Gemini-generated executive summary
   keyDecisions: text
   risks: text
   openQuestions: text
-  status: text                    // "uploading" | "transcribing" | "completed" | "failed"
+  status: text                         // "uploading" | "transcribing" | "summarizing" | "completed" | "failed"
   createdAt, updatedAt: timestamp
 }
 
@@ -129,10 +135,11 @@ action_items: {
   id: uuid
   meetingId: uuid              // FK -> meetings.id
   task: text
-  ownerName: text
-  priority: text                  // "high" | "medium" | "low"
-  dueDate: timestamp
-  status: text                      // "pending" | "done"
+  ownerName: text                 // plain-text name extracted from the transcript (e.g. "Sarah")
+  ownerUserId: text                  // reserved for linking a task to a real invited account; not currently populated — see Future Improvements
+  priority: text                        // "high" | "medium" | "low"
+  dueDate: timestamp                       // extracted by Gemini when a deadline is mentioned, converted to an absolute date
+  status: text                                // "pending" | "in_progress" | "completed"
   createdAt, updatedAt: timestamp
 }
 
@@ -140,6 +147,7 @@ meeting_participants: {
   id: uuid
   meetingId: uuid              // FK -> meetings.id
   userId: text                   // Clerk user id of invited participant
+  email: text                       // invited email, stored for display
   canEdit: boolean
   invitedAt: timestamp
 }
@@ -151,7 +159,7 @@ Access control: every backend route checks whether the requesting `userId` is ei
 
 ## Why This Project
 
-Demonstrates: authenticated full-stack architecture, relational data modeling with a join table for shared access, authorization logic beyond simple per-user ownership, integration of two distinct external APIs (speech-to-text and an LLM) into a real processing pipeline, and honest, deliberate scope decisions explained and defended rather than left implicit.
+Demonstrates: authenticated full-stack architecture, relational data modeling with a join table for shared access, authorization logic beyond simple per-user ownership, integration of two distinct external APIs (speech-to-text and an LLM) into a real processing pipeline, a working retry mechanism for asynchronous AI jobs, and honest, deliberate scope decisions explained and defended rather than left implicit.
 
 ---
 
@@ -161,6 +169,7 @@ Deliberately left out of this project's scope, in the interest of shipping a sma
 
 - **Live call integration** — joining Zoom/Meet directly, streaming transcription, bot infrastructure. A multi-week effort on its own; the reason tools like Fireflies represent years of funded engineering.
 - **Automatic task-completion detection** — would require monitoring external systems (GitHub, email, calendar) to infer when a task is actually done. Replaced with an honest manual checkbox, consistent with how even mature tools like Confluence handle task completion.
+- **Per-task ownership enforcement** — `ownerName` is extracted from speech as plain text (e.g. "Sarah") but isn't matched to a real invited account, so `ownerUserId` is reserved in the schema but currently unused. Today, edit permission is granted per-meeting via `canEdit`, not per-task — a Participant with edit access can update any action item in a shared meeting, not just ones assigned to them by name.
 - **Full organizational role hierarchy** — replaced with a simpler, correctly-scoped Creator/Participant model tied to individual meetings rather than a global org structure.
 - **Version history** for edited summaries/action items.
 - **Notifications** (email/in-app) for new invites or assigned tasks.

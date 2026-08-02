@@ -52,9 +52,9 @@ export async function post(endpoint: string, data: any, token: string | null): P
   });
 }
 
-export async function put(endpoint: string, data: any, token: string | null): Promise<Response> {
+export async function patch(endpoint: string, data: any, token: string | null): Promise<Response> {
   return apiRequest(endpoint, token, {
-    method: 'PUT',
+    method: 'PATCH',
     body: JSON.stringify(data),
   });
 }

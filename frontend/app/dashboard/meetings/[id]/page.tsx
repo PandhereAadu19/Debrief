@@ -4,8 +4,8 @@ import { useState, useEffect } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { useAuth } from '@clerk/nextjs';
 import Link from 'next/link';
-import { ArrowLeft, Loader2, AlertCircle, ChevronDown, ChevronUp, Check, RefreshCw, FileText, CheckCircle2, AlertTriangle, HelpCircle, ListChecks } from 'lucide-react';
-import { get, post } from '@/lib/api';
+import { ArrowLeft, Loader2, AlertCircle, ChevronDown, ChevronUp, Check, RefreshCw, FileText, CheckCircle2, AlertTriangle, HelpCircle, ListChecks, Users, X, Mail, Shield } from 'lucide-react';
+import { get, post, patch, del } from '@/lib/api';
 
 interface ActionItem {
   id: string;
@@ -17,6 +17,15 @@ interface ActionItem {
   status: string;
   createdAt: string;
   updatedAt: string;
+}
+
+interface Participant {
+  id: string;
+  meetingId: string;
+  userId: string;
+  email: string;
+  canEdit: boolean;
+  invitedAt: string;
 }
 
 interface Meeting {
@@ -34,6 +43,7 @@ interface Meeting {
   updatedAt: string;
   role: string;
   actionItems: ActionItem[];
+  participants?: Participant[];
 }
 
 export default function MeetingDetailPage() {
@@ -48,6 +58,10 @@ export default function MeetingDetailPage() {
   const [retrying, setRetrying] = useState(false);
   const [updatingActionItem, setUpdatingActionItem] = useState<string | null>(null);
   const [transcriptOpen, setTranscriptOpen] = useState(false);
+  const [inviteEmail, setInviteEmail] = useState('');
+  const [inviteCanEdit, setInviteCanEdit] = useState(false);
+  const [inviting, setInviting] = useState(false);
+  const [inviteError, setInviteError] = useState<string | null>(null);
 
   const fetchMeeting = async () => {
     try {
@@ -87,7 +101,7 @@ export default function MeetingDetailPage() {
       
       const token = await getToken();
       
-      await post(`/api/meetings/${meetingId}/retry`, null, token);
+      await post(`/api/meetings/${meetingId}/retry`, {}, token);
       
       // Reset to loading state and start polling
       setLoading(true);
@@ -162,6 +176,68 @@ export default function MeetingDetailPage() {
         return <span className="px-2 py-0.5 bg-surfaceLight text-textMuted rounded text-xs font-medium">Low</span>;
       default:
         return <span className="px-2 py-0.5 bg-accent/10 text-accent rounded text-xs font-medium">Medium</span>;
+    }
+  };
+
+  const handleInvite = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!inviteEmail.trim()) return;
+
+    try {
+      setInviting(true);
+      setInviteError(null);
+      const token = await getToken();
+      
+      await post(`/api/meetings/${meetingId}/participants`, {
+        email: inviteEmail,
+        canEdit: inviteCanEdit,
+      }, token);
+      
+      // Refresh meeting to get updated participants
+      await fetchMeeting();
+      setInviteEmail('');
+      setInviteCanEdit(false);
+    } catch (err: any) {
+      console.error('Error inviting participant:', err);
+      const errorMessage = err.message || 'Failed to invite participant';
+      // Try to parse error from response
+      if (errorMessage.includes('API request failed')) {
+        setInviteError('Failed to invite. Please try again.');
+      } else {
+        setInviteError(errorMessage);
+      }
+    } finally {
+      setInviting(false);
+    }
+  };
+
+  const handleRemoveParticipant = async (participantUserId: string) => {
+    if (!confirm('Are you sure you want to remove this participant?')) return;
+
+    try {
+      const token = await getToken();
+      await del(`/api/meetings/${meetingId}/participants/${participantUserId}`, token);
+      
+      // Refresh meeting to get updated participants
+      await fetchMeeting();
+    } catch (err) {
+      console.error('Error removing participant:', err);
+      alert('Failed to remove participant. Please try again.');
+    }
+  };
+
+  const handleToggleCanEdit = async (participantUserId: string, currentCanEdit: boolean) => {
+    try {
+      const token = await getToken();
+      await patch(`/api/meetings/${meetingId}/participants/${participantUserId}`, {
+        canEdit: !currentCanEdit,
+      }, token);
+      
+      // Refresh meeting to get updated participants
+      await fetchMeeting();
+    } catch (err) {
+      console.error('Error toggling canEdit:', err);
+      alert('Failed to update permissions. Please try again.');
     }
   };
 
@@ -350,7 +426,99 @@ export default function MeetingDetailPage() {
         </div>
 
         {/* Action Items Sidebar */}
-        <div className="lg:col-span-1">
+        <div className="lg:col-span-1 space-y-6">
+          {/* Shared with Section */}
+          <div className="bg-surface rounded-xl border border-border p-6 shadow-sm">
+            <h2 className="flex items-center gap-2 text-lg font-semibold text-text mb-4" style={{ fontFamily: 'var(--font-space-grotesk)' }}>
+              <div className="w-8 h-8 rounded-lg bg-accent/10 flex items-center justify-center flex-shrink-0">
+                <Users size={18} className="text-accent" />
+              </div>
+              Shared with
+            </h2>
+            
+            {meeting.role === 'creator' && (
+              <form onSubmit={handleInvite} className="mb-4">
+                <div className="space-y-3">
+                  <div className="relative">
+                    <Mail size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-textMuted" />
+                    <input
+                      type="email"
+                      value={inviteEmail}
+                      onChange={(e) => setInviteEmail(e.target.value)}
+                      placeholder="Enter email to invite"
+                      className="w-full pl-10 pr-4 py-2 bg-background border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-accent/50 focus:border-accent"
+                    />
+                  </div>
+                  <label className="flex items-center gap-2 text-sm text-text cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={inviteCanEdit}
+                      onChange={(e) => setInviteCanEdit(e.target.checked)}
+                      className="w-4 h-4 rounded border-border text-accent focus:ring-accent"
+                    />
+                    <span>Allow editing</span>
+                  </label>
+                  <button
+                    type="submit"
+                    disabled={inviting || !inviteEmail.trim()}
+                    className="w-full px-4 py-2 bg-accent hover:bg-accentHover text-background rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {inviting ? 'Inviting...' : 'Invite'}
+                  </button>
+                  {inviteError && (
+                    <p className="text-xs text-danger">{inviteError}</p>
+                  )}
+                </div>
+              </form>
+            )}
+            
+            {(!meeting.participants || meeting.participants.length === 0) ? (
+              <p className="text-sm text-textMuted">
+                {meeting.role === 'creator' ? 'No participants yet. Invite someone above.' : 'No other participants.'}
+              </p>
+            ) : (
+              <div className="space-y-2">
+                {meeting.participants.map((participant) => (
+                  <div
+                    key={participant.id}
+                    className="flex items-center justify-between p-3 bg-background rounded-lg border border-border"
+                  >
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium text-text truncate">{participant.email}</p>
+                      <div className="flex items-center gap-2 mt-1">
+                        {participant.canEdit && (
+                          <span className="flex items-center gap-1 text-xs px-2 py-0.5 bg-accent/10 text-accent rounded">
+                            <Shield size={10} />
+                            Can edit
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                    {meeting.role === 'creator' && (
+                      <div className="flex items-center gap-2 ml-2">
+                        <button
+                          onClick={() => handleToggleCanEdit(participant.userId, participant.canEdit)}
+                          className="p-1.5 text-textMuted hover:text-accent hover:bg-accent/10 rounded transition-colors"
+                          title={participant.canEdit ? 'Remove edit permission' : 'Grant edit permission'}
+                        >
+                          <Shield size={16} />
+                        </button>
+                        <button
+                          onClick={() => handleRemoveParticipant(participant.userId)}
+                          className="p-1.5 text-textMuted hover:text-danger hover:bg-danger/10 rounded transition-colors"
+                          title="Remove participant"
+                        >
+                          <X size={16} />
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Action Items */}
           <div className="bg-surface rounded-xl border border-border p-6 sticky top-4 shadow-sm">
             <h2 className="flex items-center gap-2 text-lg font-semibold text-text mb-4" style={{ fontFamily: 'var(--font-space-grotesk)' }}>
               <div className="w-8 h-8 rounded-lg bg-accent/10 flex items-center justify-center flex-shrink-0">
