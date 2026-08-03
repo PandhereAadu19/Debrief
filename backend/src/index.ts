@@ -10,6 +10,7 @@ const PORT = process.env.PORT || 4000;
 
 const allowedOrigins: string[] = [
   'http://localhost:3000',
+  'https://debrief-backend-9xne.onrender.com',
   process.env.FRONTEND_URL,
 ].filter((url): url is string => Boolean(url));
 
