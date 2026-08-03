@@ -6,11 +6,16 @@ import healthRouter from './routes/health';
 import meetingsRouter from './routes/meetings';
 
 const app = express();
-const PORT = 4000;
+const PORT = process.env.PORT || 4000;
+
+const allowedOrigins: string[] = [
+  'http://localhost:3000',
+  process.env.FRONTEND_URL,
+].filter((url): url is string => Boolean(url));
 
 // Enable CORS for frontend
 app.use(cors({
-  origin: 'http://localhost:3000',
+  origin: allowedOrigins,
   credentials: true
 }));
 
