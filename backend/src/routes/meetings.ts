@@ -25,7 +25,7 @@ declare global {
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
-    fileSize: 100 * 1024 * 1024, // 100MB
+    fileSize: 50 * 1024 * 1024, // 50MB
   },
   fileFilter: (req, file, cb) => {
     const allowedExtensions = ['.mp3', '.wav', '.m4a', '.ogg', '.webm', '.mp4'];
@@ -115,7 +115,7 @@ async function processMeeting(meetingId: string, audioBuffer?: Buffer, existingU
 
     // Step 3: Poll transcript status
     let transcriptText: string | null = null;
-    const maxAttempts = 60; // 5 minutes with 5-second intervals
+    const maxAttempts = 180; // 15 minutes with 5-second intervals
     let attempts = 0;
 
     while (attempts < maxAttempts) {
@@ -233,7 +233,18 @@ ${transcriptText}`;
 }
 
 // POST /api/meetings - Create a new meeting with audio upload
-router.post('/', upload.single('audio'), async (req: Request, res: Response) => {
+router.post('/', (req: Request, res: Response, next: Function) => {
+  upload.single('audio')(req, res, (err: any) => {
+    if (err) {
+      console.error('Multer upload error:', err.message);
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        return res.status(413).json({ error: 'Audio file is too large. Please keep recordings under 25MB.' });
+      }
+      return res.status(400).json({ error: err.message || 'File upload failed.' });
+    }
+    next();
+  });
+}, async (req: Request, res: Response) => {
   try {
     const { title } = req.body;
     const audioFile = req.file;
