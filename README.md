@@ -166,7 +166,9 @@ transcript_chunks: {
 }
 ```
 
-Access control: every backend route checks whether the requesting `userId` is either the meeting's `creatorId` or present in `meeting_participants` for that `meetingId` before returning data — this is the enforcement point for the Creator/Participant role model above.The same access check applies to Ask Debrief's retrieval query — vector search results are filtered to meetings the requesting user can access before being passed to the LLM, not just at the point of display.
+Access control: every backend route checks whether the requesting `userId` is either the meeting's `creatorId` or present in `meeting_participants` for that `meetingId` before returning data — this is the enforcement point for the Creator/Participant role model above.
+
+The same access check applies to Ask Debrief's retrieval query — vector search results are filtered to meetings the requesting user can access before being passed to the LLM, not just at the point of display.
 
 ---
 
