@@ -4,6 +4,7 @@ import cors from 'cors';
 import { authMiddleware } from './middleware/auth';
 import healthRouter from './routes/health';
 import meetingsRouter from './routes/meetings';
+import askRouter from './routes/ask';
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -31,6 +32,8 @@ app.use('/api', authMiddleware);
 
 // Meetings routes
 app.use('/api/meetings', meetingsRouter);
+
+app.use('/api/ask', askRouter);   // add this line after the meetings router line
 
 // Global error handler - catches anything that slips through route-level handling
 app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {

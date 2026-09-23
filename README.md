@@ -36,6 +36,8 @@ Debrief solves this with a real, working pipeline: audio in, structured intellig
 - **Automatic transcription** — AssemblyAI
 - **Structured AI output** — Google Gemini extracts an Executive Summary, Key Decisions, Risks, Open Questions, and a structured Action Item list (task, owner name, priority, due date where mentioned)
 - **Retry on failure** — if AI processing fails, a retry button re-triggers the pipeline on the stored audio
+- **Ask Debrief — semantic search across meetings** — a natural-language search bar (dashboard-wide, or scoped to a single meeting) that retrieves relevant transcript chunks via vector similarity and synthesizes a grounded, cited answer with Gemini, including the source meeting(s) and any related action items. Retrieval is scoped to meetings the requesting user actually has access to — the same Creator/Participant check used everywhere else in the app, applied at the retrieval layer, not just the UI.
+- **Resilient AI calls** — Gemini requests (summarization, embedding, and Ask Debrief's answer generation) use exponential backoff retry on transient `503` capacity errors, rather than failing the whole pipeline on a single upstream blip.
 - **Task tracking** — each action item is independently marked pending / in progress / completed by a human, not auto-detected
 - **Cross-meeting task dashboard** — a single view aggregating all of a user's open action items across every meeting they're part of, not buried inside individual meeting pages, with priority grouping and status filtering
 - **Status filtering on the main dashboard** — filter meetings by All / Completed / Processing / Failed
@@ -72,10 +74,11 @@ There is a single sign-up flow for everyone — no "choose your role" step. Role
 - Drizzle ORM
 - Neon (serverless Postgres)
 - Clerk backend SDK (token verification, user lookup by email for invites)
+- pgvector (Postgres extension, via Neon) — vector storage and cosine-similarity search for semantic retrieval
 
 **External APIs**
 - AssemblyAI — speech-to-text transcription
-- Google Gemini — summarization and structured extraction
+- Google Gemini — summarization, structured extraction, text embeddings (`gemini-embedding-001`), and RAG answer synthesis
 
 **Deployment**
 - Frontend: Vercel
@@ -99,6 +102,9 @@ There is a single sign-up flow for everyone — no "choose your role" step. Role
    risks, open questions, and action items (with owner name, priority,
    and due date where mentioned) returned and saved → status = "completed"
    (or "failed")
+5a. Transcript is chunked and embedded (Gemini embeddings), stored in a
+    pgvector-backed table — this happens automatically, invisibly, so
+    every completed meeting becomes searchable without user action.
 6. Creator opens the meeting: reviews the structured output,
    invites teammates by email if the meeting should be shared,
    optionally grants them canEdit
@@ -151,9 +157,16 @@ meeting_participants: {
   canEdit: boolean
   invitedAt: timestamp
 }
+transcript_chunks: {
+  id: uuid
+  meetingId: uuid              // FK -> meetings.id
+  chunkText: text                 // ~500-char overlapping slice of the transcript
+  embedding: vector(3072)            // gemini-embedding-001 output
+  createdAt: timestamp
+}
 ```
 
-Access control: every backend route checks whether the requesting `userId` is either the meeting's `creatorId` or present in `meeting_participants` for that `meetingId` before returning data — this is the enforcement point for the Creator/Participant role model above.
+Access control: every backend route checks whether the requesting `userId` is either the meeting's `creatorId` or present in `meeting_participants` for that `meetingId` before returning data — this is the enforcement point for the Creator/Participant role model above.The same access check applies to Ask Debrief's retrieval query — vector search results are filtered to meetings the requesting user can access before being passed to the LLM, not just at the point of display.
 
 ---
 
@@ -175,6 +188,7 @@ Deliberately left out of this project's scope, in the interest of shipping a sma
 - **Notifications** (email/in-app) for new invites or assigned tasks.
 - **Analytics dashboard** beyond the basic stats already shown.
 - **Granular per-meeting permission settings UI** — the `canEdit` boolean already covers the core need; a full settings panel would be polish on top of polish.
+- **Stricter answer grounding** — Ask Debrief occasionally surfaces the top-k nearest chunks even when none are truly relevant to the question (cosine similarity always returns *something*), and very short/ambiguous transcript segments can occasionally lead to minor detail slips in synthesis (e.g. a specific date or quarter). A similarity-threshold cutoff and an entity-level grounding check against source chunks would harden this further.
 
 ---
 

@@ -7,6 +7,8 @@ import { db } from '../db';
 import { meetings, meetingParticipants, actionItems } from '../db/schema';
 import { eq, and, or, desc } from 'drizzle-orm';
 import path from 'path';
+import { chunkText, embedText } from '../lib/embeddings';
+import {transcriptChunks} from '../db/schema';
 
 const router = Router();
 
@@ -53,6 +55,36 @@ const upload = multer({
     }
   },
 });
+
+async function generateGeminiWithRetry(
+  model: any,
+  prompt: string,
+  maxRetries = 4
+) {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await model.generateContent(prompt);
+    } catch (error: any) {
+      const status = error?.status;
+
+      // Retry only for temporary server/capacity errors
+      if (status === 503 && attempt < maxRetries) {
+        const delay = Math.pow(2, attempt) * 5000;
+
+        console.log(
+          `Gemini returned 503. Retrying in ${delay / 1000} seconds...`
+        );
+
+        await new Promise(resolve => setTimeout(resolve, delay));
+        continue;
+      }
+
+      throw error;
+    }
+  }
+
+  throw new Error('Gemini request failed after retries');
+}
 
 // Helper function to process meeting asynchronously
 async function processMeeting(meetingId: string, audioBuffer?: Buffer, existingUploadUrl?: string) {
@@ -180,7 +212,7 @@ async function processMeeting(meetingId: string, audioBuffer?: Buffer, existingU
 Transcript:
 ${transcriptText}`;
 
-    const result = await model.generateContent(prompt);
+    const result = await generateGeminiWithRetry(model, prompt);
     const responseText = result.response.text();
     
     // Extract JSON from response (in case there's markdown formatting)
@@ -218,6 +250,17 @@ ${transcriptText}`;
           updatedAt: new Date(),
         });
       }
+    }
+
+    // Step 8: Chunk, embed, and store transcript for semantic search
+    const chunks = chunkText(transcriptText);
+    for (const chunk of chunks) {
+      const embedding = await embedText(chunk);
+      await db.insert(transcriptChunks).values({
+        meetingId,
+        chunkText: chunk,
+        embedding,
+      });
     }
 
   } catch (error) {

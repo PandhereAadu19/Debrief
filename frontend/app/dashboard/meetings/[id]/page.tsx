@@ -6,6 +6,7 @@ import { useAuth } from '@clerk/nextjs';
 import Link from 'next/link';
 import { ArrowLeft, Loader2, AlertCircle, ChevronDown, ChevronUp, Check, RefreshCw, FileText, CheckCircle2, AlertTriangle, HelpCircle, ListChecks, Users, X, Mail, Shield } from 'lucide-react';
 import { get, post, patch, del } from '@/lib/api';
+import AskDebrief from '@/components/AskDebrief';
 
 interface ActionItem {
   id: string;
@@ -358,6 +359,8 @@ export default function MeetingDetailPage() {
               </p>
             </div>
           )}
+
+          <AskDebrief meetingId={params.id as string} />
 
           {/* Key Decisions */}
           {meeting.keyDecisions && (

@@ -5,6 +5,7 @@ import { useState, useEffect, useMemo, useRef } from 'react';
 import Link from 'next/link';
 import { get } from '@/lib/api';
 import { ChevronDown, Circle } from 'lucide-react';
+import AskDebrief from '@/components/AskDebrief';
 
 interface Meeting {
   id: string;
@@ -252,6 +253,8 @@ export default function DashboardPage() {
           + New Meeting
         </Link>
       </div>
+
+      <AskDebrief />
 
       {/* Stats Row */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 sm:gap-6 mb-8 sm:mb-12">
